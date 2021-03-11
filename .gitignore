@@ -30,3 +30,21 @@
 *.exe
 *.out
 *.app
+
+# dir
+bin/
+build/
+lib/
+Debug/
+debug/
+Release/
+release/
+
+# visual studio file
+.vs/
+x64/
+x86/
+*.sln
+*.vcxproj
+*.filters
+*.user

@@ -22,6 +22,9 @@ Frame::Ptr Frame::createFrame() {
 }
 
 double Frame::findDepth(const cv::KeyPoint& kp) {
+  if (depth_.empty()) {
+    return -1.0;
+  }
   int x = cvRound(kp.pt.x);
   int y = cvRound(kp.pt.y);
   ushort d = depth_.ptr<ushort>(y)[x];
@@ -53,6 +56,15 @@ bool Frame::isInFrame(const Vector3d& pt_world) {
   // cout<<"P_pixel = "<<pixel.transpose()<<endl<<endl;
   return pixel(0, 0) > 0 && pixel(1, 0) > 0 && pixel(0, 0) < color_.cols &&
          pixel(1, 0) < color_.rows;
+}
+
+void Frame::setStaticBGMask(Mat mask) { static_background_mask = mask; }
+void Frame::addDynamicObjMask(unsigned long id, Mat mask) {
+  dynamic_obj_masks.emplace_back(id, mask);
+}
+// p->id ±ØÐëÊÇ ObjID!
+void Frame::addObjMapPoint(MapPoint::Ptr& p) {
+  dynamic_map_points[p->id_].emplace_back(p);
 }
 
 }  // namespace myslam

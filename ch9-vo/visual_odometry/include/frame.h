@@ -3,6 +3,7 @@
 
 #include "camera.h"
 #include "common_include.h"
+#include "mappoint.h"
 
 namespace myslam {
 
@@ -19,6 +20,13 @@ class Frame {
   // std::vector<cv::KeyPoint>      keypoints_;  // key points in image
   // std::vector<MapPoint*>         map_points_; // associated map points
   bool is_key_frame_;  // whether a key-frame
+
+  // 使用下列的 mask 来支持 dynamic SLAM
+  Mat static_background_mask;
+  std::vector<std::pair<unsigned long, cv::Mat>>
+      dynamic_obj_masks;  // Obj-ID, Mask!
+  std::unordered_map<unsigned long, std::vector<Eigen::Vector3f>>
+      dynamic_map_points; // Obj-ID, MapPoints
 
  public:  // data members
   Frame();
@@ -38,6 +46,11 @@ class Frame {
 
   // check if a point is in this frame
   bool isInFrame(const Vector3d& pt_world);
+
+  //
+  void setStaticBGMask(Mat mask);
+  void addDynamicObjMask(unsigned long id, Mat mask);
+  void addObjMapPoint(MapPoint::Ptr& p);
 };
 
 }  // namespace myslam

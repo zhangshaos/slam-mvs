@@ -1,6 +1,7 @@
 #ifndef COMMON_INCLUDE_H
 #define COMMON_INCLUDE_H
 
+
 // define the commonly included file to avoid a long include list
 // for Eigen
 #include <Eigen/Core>
@@ -27,5 +28,8 @@ using cv::Mat;
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+using std::cout;
+using std::cerr;
 
 #endif

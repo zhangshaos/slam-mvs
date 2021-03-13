@@ -11,7 +11,7 @@ class MapPoint {
   typedef std::shared_ptr<MapPoint> Ptr;
   unsigned long id_;                 // ID
   static unsigned long factory_id_;  // factory id
-  bool good_;                        // wheter a good point
+  bool good_;                        // whether a good point
   Vector3d pos_;                     // Position in world
   Vector3d norm_;                    // Normal of viewing direction
   Mat descriptor_;                   // Descriptor for matching

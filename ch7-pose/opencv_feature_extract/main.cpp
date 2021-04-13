@@ -5,6 +5,7 @@ namespace fs = std::filesystem;
 using namespace std;
 
 #include <opencv2/opencv.hpp>
+#include <opencv2/imgproc.hpp>
 
 int main() {
   fs::path path1 =
@@ -17,10 +18,23 @@ int main() {
       "\\180116_053947909_Camera_5.jpg";
 
   auto img1 = cv::imread(path1.string()), img2 = cv::imread(path2.string());
-  auto orb = cv::ORB::create(10000);
+  //********* 测试 ***********
+  //cv::Mat img_gray;
+  //cv::cvtColor(img1, img_gray, cv::COLOR_RGB2GRAY);
+  //printf("img1 rows: %d, cols: %d, type: %d\n", img1.rows, img1.cols,
+  //       img1.type());
+  //printf("img1_gray rows: %d, cols: %d, type: %d\n", img_gray.rows, img_gray.cols,
+  //       img_gray.type());
+  //cv::imshow("color", img1);
+  //cv::imshow("gray", img_gray);
+  //cv::waitKey();
+  //*************************
+  auto orb = cv::ORB::create();
+  // auto sift = cv::SIFT::create(500);
 
   // 开始检测特征点
   vector<cv::KeyPoint> kps1, kps2;
+  // sift->detect(img1, kps1);
   orb->detect(img1, kps1);
   orb->detect(img2, kps2);
 

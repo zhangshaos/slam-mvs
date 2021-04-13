@@ -23,7 +23,9 @@ class VisualOdometry {
   std::vector<cv::KeyPoint> keypoints_ref_,
       keypoints_curr_;                      // keypoints in current frame
   Mat descriptors_ref_, descriptors_curr_;  // descriptor in current frame
+  
   // 下面的是动态物体的特征点和描述符
+  bool use_dynamic;
   std::unordered_map<unsigned long, std::vector<cv::KeyPoint>> dy_kpts_ref_,
       dy_kpts_cur_;  // ObjID, keypoints
   std::unordered_map<unsigned long, Mat> dy_desp_ref_,
@@ -47,18 +49,20 @@ class VisualOdometry {
   double key_frame_min_rot;       // minimal rotation of two key-frames
   double key_frame_min_trans;     // minimal translation of two key-frames
   double map_point_erase_ratio_;  // remove map point ratio
+  float max_depth_;
 
  public:  // functions
   VisualOdometry();
   ~VisualOdometry();
 
-  bool addFrame(Frame::Ptr frame);  // add a new frame
 
   // <用处>：通过 frame 来获取动态物体的数量，然后 resize
   // 所有动态物体的特征点和描述符
-  void run(cv::Mat img);
+  void run(cv::Mat img, cv::Mat bg_mask,
+           std::vector<std::pair<unsigned long, cv::Mat>>& id_and_masks);
 
  protected:
+  bool addFrame(Frame::Ptr frame);  // add a new frame
   // inner operation
   // 下面的操作一般针对静态背景的初始化（只有 2D-2D 估计位姿时）
   void VisualOdometry::find_feature_matches(
@@ -71,7 +75,7 @@ class VisualOdometry {
                             std::vector<cv::DMatch>& matches, Mat& R, Mat& t);
   void triangulation(const std::vector<cv::KeyPoint>& keypoint_1,
                      const std::vector<cv::KeyPoint>& keypoint_2,
-                     const std::vector<cv::DMatch>& matches, const Mat& R,
+                     std::vector<cv::DMatch>& matches, const Mat& R,
                      const Mat& t, std::vector<cv::Point3d>& points);
   void compute_kp_match(cv::Mat& desp1, cv::Mat& desp2,
                         std::vector<cv::DMatch>& matches);
@@ -99,9 +103,12 @@ class VisualOdometry {
   void passed() {
     ref_ = curr_;
     keypoints_ref_ = keypoints_curr_;
-    descriptors_ref_ = descriptors_curr_;
+    descriptors_ref_ = descriptors_curr_.clone();
     dy_kpts_ref_ = dy_kpts_cur_;
-    dy_desp_ref_ = dy_desp_cur_;
+    //dy_desp_ref_ = dy_desp_cur_;
+    for (auto& [id, m] : dy_desp_cur_) {
+      dy_desp_ref_[id] = m.clone();
+    }
   }
 };
 }  // namespace myslam

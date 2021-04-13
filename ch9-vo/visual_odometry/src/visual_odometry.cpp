@@ -1,6 +1,7 @@
 #define _USE_MATH_DEFINES
 #include "../include/visual_odometry.h"
 
+#include <Eigen/Geometry>
 #include <algorithm>
 #include <boost/format.hpp>
 #include <boost/timer.hpp>
@@ -9,6 +10,13 @@
 #include <opencv2/core/eigen.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/opencv.hpp>
+
+//-- DEBUG
+#include <opencv2/viz.hpp>
+namespace vz = cv::viz;
+vz::Viz3d window;
+//-- DEBUG
 
 #include "../include/config.h"
 #include "../include/g2o_types.h"
@@ -16,12 +24,13 @@
 namespace myslam {
 
 VisualOdometry::VisualOdometry()
-    : state_(INITIALIZING),
+    : state_(BEFORE_INITIALIZING),
       ref_(nullptr),
       curr_(nullptr),
       map_(new Map),
       num_lost_(0),
       num_inliers_(0),
+      use_dynamic(false),
       matcher_flann_(new cv::flann::LshIndexParams(5, 10, 2)) {
   num_of_features_ = Config::get<int>("number_of_features");
   scale_factor_ = Config::get<double>("scale_factor");
@@ -32,6 +41,7 @@ VisualOdometry::VisualOdometry()
   key_frame_min_rot = Config::get<double>("keyframe_rotation");
   key_frame_min_trans = Config::get<double>("keyframe_translation");
   map_point_erase_ratio_ = Config::get<double>("map_point_erase_ratio");
+  max_depth_ = Config::get<float>("max_depth");
   orb_ = cv::ORB::create(num_of_features_, scale_factor_, level_pyramid_);
 }
 
@@ -40,12 +50,18 @@ VisualOdometry::~VisualOdometry() {}
 //**************************************//
 //--------------- M-A-I-N --------------//
 //**************************************//
-void VisualOdometry::run(cv::Mat img) {
+void VisualOdometry::run(
+    cv::Mat img, cv::Mat bg_mask,
+    std::vector<std::pair<unsigned long, cv::Mat>>& id_and_masks) {
   Frame::Ptr pFrame = myslam::Frame::createFrame();
   pFrame->camera_ = Camera::Ptr(new myslam::Camera);
   pFrame->color_ = img;
-  //pFrame->depth_ = depth;
-  //pFrame->time_stamp_ = rgb_times[i];
+  // pFrame->depth_ = depth;
+  // pFrame->time_stamp_ = rgb_times[i];
+  for (auto& [id, mask] : id_and_masks) {
+    pFrame->addDynamicObjMask(id, mask);
+  }
+  pFrame->setStaticBGMask(bg_mask);
   addFrame(pFrame);
 }
 
@@ -53,8 +69,11 @@ void VisualOdometry::compute_kp_match(cv::Mat& desp1, cv::Mat& desp2,
                                       std::vector<cv::DMatch>& matches) {
   using namespace std;
   boost::timer timer;
-  matcher_flann_.match(desp1, desp2, matches);
+  cv::BFMatcher matcher(cv::NORM_HAMMING);
+  // matcher_flann_.match(desp1, desp2, matches);
+  matcher.match(desp1, desp2, matches);
   cout << "compute flann matching cost time: " << timer.elapsed() << endl;
+
   // 排除一些不必要的匹配
   float min_dist = 1e8f, max_dist = 0.f;
   for (auto& dm : matches) {
@@ -68,6 +87,8 @@ void VisualOdometry::compute_kp_match(cv::Mat& desp1, cv::Mat& desp2,
       good_match.push_back(dm);
   }
   swap(good_match, matches);
+  printf("Frame %d - Frame %d, good match is %lld\n", curr_->id_, ref_->id_,
+         matches.size());
 }
 
 // 对静态物体增加场景 3D 点
@@ -82,6 +103,8 @@ void VisualOdometry::addMapPoints(std::vector<cv::DMatch>& matches,
     int j = matches[i].trainIdx;  // j == curr_ 's descriptor idx
     MapPoint::Ptr map_point = MapPoint::createMapPoint(
         p_world, n, descriptors_curr_.row(j).clone(), curr_.get());
+    map_point->visible_times_++;
+    map_point->matched_times_++;
     map_->insertMapPoint(map_point);
   }
 }
@@ -122,6 +145,12 @@ void VisualOdometry::pose_estimation_2d2d(
   // compute E
   boost::timer timer;
   Mat E = cv::findEssentialMat(pts1, pts2, K);
+  Mat F = cv::findFundamentalMat(pts1, pts2);
+  auto F_E = K.t() * F * K;
+  cout << "initial E:\n" << E << "\nF=>E:\n" << F_E << endl;
+  Mat H = cv::findHomography(pts1, pts2);
+  cout << "H:\n" << H << endl;
+
   // 从 E 中得到旋转和平移
   cv::recoverPose(E, pts1, pts2, K, R, t);
   cout << "compute E and recover Pose cost time: " << timer.elapsed() << endl;
@@ -129,9 +158,10 @@ void VisualOdometry::pose_estimation_2d2d(
   std::cout << "t is " << endl << t << endl;
 }
 
+// 备注：此函数会筛选三角化生成的 3D 点和 matches
 void VisualOdometry::triangulation(const std::vector<cv::KeyPoint>& keypoint_1,
                                    const std::vector<cv::KeyPoint>& keypoint_2,
-                                   const std::vector<cv::DMatch>& matches,
+                                   std::vector<cv::DMatch>& matches,
                                    const Mat& R, const Mat& t,
                                    std::vector<cv::Point3d>& points) {
   using namespace std;
@@ -160,13 +190,30 @@ void VisualOdometry::triangulation(const std::vector<cv::KeyPoint>& keypoint_1,
   Mat pts;
   cv::triangulatePoints(T1, T2, pts1, pts2, pts);  // 输入矩阵必须是浮点类型
   cout << "triangulate points cost time: " << timer.elapsed() << endl;
+
   // 转换成非齐次坐标
+  ofstream f("h_points.txt"); //--DEBUG
+  vector<DMatch> good_match;
   for (int i = 0; i < pts.cols; i++) {
     Mat x = pts.col(i);
     x /= x.at<float>(3, 0);  // 归一化
     Point3d p(x.at<float>(0, 0), x.at<float>(1, 0), x.at<float>(2, 0));
+
+    //-- DEBUG
+    f << boost::format("%lf;%lf;%lf\n") % p.x % p.y % p.z;
+    f.flush();
+    //-- DEBUG
+
+    // 筛选不合适的点
+    Point2f p_reproj(p.x / p.z, p.y / p.z);
+    auto diff = p_reproj - pts1[i];
+    if (diff.dot(diff) > 1e-6 || p.z < 0 || p.z > max_depth_) continue;
     points.push_back(p);
+    good_match.emplace_back(matches[i]);
   }
+  swap(matches, good_match);
+  printf("Frame %d - Frame %d, triangulation points %lld\n", curr_->id_,
+         ref_->id_, points.size());
 }
 
 // 使用 ref_ 和 curr_ 两帧静态物体来三角化和初始化点云！
@@ -206,7 +253,7 @@ bool VisualOdometry::addFrame(Frame::Ptr frame) {
       extractKeyPoints();
       computeDescriptors();
       curr_->T_c_w_ = SE3(Eigen::Matrix4d::Identity());
-      compute_dynamic_feature();
+      if (use_dynamic) compute_dynamic_feature();
       passed();
       state_ = INITIALIZING;
       break;
@@ -223,7 +270,7 @@ bool VisualOdometry::addFrame(Frame::Ptr frame) {
         // 为了 OK 时对动态物体三角化
         // 从 frame 中读取动态物体的所有 mask，然后计算特征点和描述符
       }
-      compute_dynamic_feature();
+      if (use_dynamic) compute_dynamic_mappoints();
       passed();
       break;
     }
@@ -232,9 +279,6 @@ bool VisualOdometry::addFrame(Frame::Ptr frame) {
       extractKeyPoints();    // 提取背景特征点
       computeDescriptors();  // 计算背景特征点描述符
       featureMatching();  // 计算背景的 3D(ref)-2D(cur) 点的匹配关系
-      // TODO: 计算 [动态物体] 特征点和描述符
-      // TODO: 三角化 [动态物体]，并生成当前相机坐标系下的物体点云
-      compute_dynamic_mappoints();
       poseEstimationPnP();               // 计算当前帧的 Tcw
       if (checkEstimatedPose() == true)  // a good estimation
       {
@@ -254,10 +298,19 @@ bool VisualOdometry::addFrame(Frame::Ptr frame) {
           cv::eigen2cv(T_c_r.rotationMatrix(), R);
           cv::eigen2cv(T_c_r.translation(), t);
           std::vector<cv::Point3d> points;
+          printf("Tcr Frame %d - Frame %d\n", curr_->id_, ref_->id_);
+          cout << "R is\n" << R << endl << "t is\n" << t << endl;
           triangulation(keypoints_ref_, keypoints_curr_, matches, R, t, points);
           addMapPoints(matches, points);
         }
+        // TODO: 计算 [动态物体] 特征点和描述符
+        // TODO: 三角化 [动态物体]，并生成当前相机坐标系下的物体点云
+        if (use_dynamic) compute_dynamic_mappoints();
         optimizeMap();  // 优化背景点
+        if (map_->map_points_.size() == 0) {
+          printf("map points is 0!!!\nSo retry initializing...\n");
+          state_ = INITIALIZING;
+        }
         num_lost_ = 0;
         if (checkKeyFrame() == true)  // is a key-frame
         {
@@ -316,7 +369,9 @@ void VisualOdometry::featureMatching() {
   }
   // 初步匹配
   vector<cv::DMatch> matches;
-  matcher_flann_.match(desp_map, descriptors_curr_, matches);
+  // matcher_flann_.match(desp_map, descriptors_curr_, matches);
+  cv::BFMatcher matcher(cv::NORM_HAMMING);
+  matcher.match(desp_map, descriptors_curr_, matches);
   // select the best matches
   float min_dist = 1e8f, max_dist = 0.f;
   for (auto& dm : matches) {
@@ -333,7 +388,7 @@ void VisualOdometry::featureMatching() {
       match_2dkp_index_.push_back(m.trainIdx);
     }
   }
-  cout << "good matches: " << match_3dpts_.size() << endl;
+  cout << "PnP good matches: " << match_3dpts_.size() << endl;
   cout << "match cost time: " << timer.elapsed() << endl;
 }
 
@@ -406,10 +461,11 @@ void VisualOdometry::poseEstimationPnP() {
   T_c_w_estimated_ =
       SE3(pose->estimate().rotation(), pose->estimate().translation());
 
-  cout << "T_c_w_estimated_: " << endl << T_c_w_estimated_.matrix() << endl;
+  cout << "Pnp T_c_w_estimated_: " << endl << T_c_w_estimated_.matrix() << endl;
 }
 
 bool VisualOdometry::checkEstimatedPose() {
+  return true;
   using namespace std;
   // check if the estimated pose is good
   if (num_inliers_ < min_inliers_) {
@@ -438,28 +494,6 @@ bool VisualOdometry::checkKeyFrame() {
 
 void VisualOdometry::addKeyFrame() { map_->insertKeyFrame(curr_); }
 
-// 需要由深度信息！
-// void VisualOdometry::addMapPoints() {
-//  using namespace std;
-//  // add the new map points into map
-//  vector<bool> matched(keypoints_curr_.size(), false);
-//  for (int index : match_2dkp_index_) matched[index] = true;
-//  for (int i = 0; i < keypoints_curr_.size(); i++) {
-//    if (matched[i] == true) continue;
-//    // 没有匹配到的像素点，
-//    double d = ref_->findDepth(keypoints_curr_[i]);
-//    if (d < 0) continue;
-//    Vector3d p_world = ref_->camera_->pixel2world(
-//        Vector2d(keypoints_curr_[i].pt.x, keypoints_curr_[i].pt.y),
-//        curr_->T_c_w_, d);
-//    Vector3d n = p_world - ref_->getCamCenter();
-//    n.normalize();
-//    MapPoint::Ptr map_point = MapPoint::createMapPoint(
-//        p_world, n, descriptors_curr_.row(i).clone(), curr_.get());
-//    map_->insertMapPoint(map_point);
-//  }
-//}
-
 void VisualOdometry::optimizeMap() {
   using namespace std;
   // remove the hardly seen and no visible points
@@ -470,7 +504,7 @@ void VisualOdometry::optimizeMap() {
       iter = map_->map_points_.erase(iter);
       continue;
     }
-    // 删掉被多次看到，但是缺无法匹配的点
+    //删掉被多次看到，但是缺无法匹配的点
     float match_ratio =
         float(iter->second->matched_times_) / iter->second->visible_times_;
     if (match_ratio < map_point_erase_ratio_) {
@@ -500,7 +534,7 @@ void VisualOdometry::optimizeMap() {
     map_point_erase_ratio_ += 0.05;
   } else
     map_point_erase_ratio_ = 0.1;
-  cout << "map points: " << map_->map_points_.size() << endl;
+  cout << "After optimize map points: " << map_->map_points_.size() << endl;
 }
 
 double VisualOdometry::getViewAngle(Frame::Ptr frame, MapPoint::Ptr point) {
@@ -517,6 +551,8 @@ void VisualOdometry::compute_dynamic_feature() {
   for (auto& [id, mask] : curr_->dynamic_obj_masks) {
     orb_->detect(curr_->color_, dy_kpts_cur_[id], mask);
     orb_->compute(curr_->color_, dy_kpts_cur_[id], dy_desp_cur_[id]);
+    printf("Frame %d, OBJ %d, keypoints is %lld\n", curr_->id_, id,
+           dy_kpts_cur_[id].size());
   }
   cout
       << boost::format(
@@ -536,8 +572,19 @@ void VisualOdometry::compute_dynamic_mappoints() {
   for (auto obj : curr_->dynamic_obj_masks) {
     auto id = obj.first;
     std::vector<cv::DMatch> matches;
+    if (dy_desp_ref_[id].empty() || dy_desp_cur_[id].empty()) continue;  // skip
     compute_kp_match(dy_desp_ref_[id], dy_desp_cur_[id], matches);
     cv::Mat R, t;
+    if (dy_kpts_ref_[id].empty() || dy_kpts_cur_[id].empty()) continue;  // skip
+
+    //-- DEBUG
+    cv::Mat show;
+    cv::drawMatches(ref_->color_, dy_kpts_ref_[id], curr_->color_,
+                    dy_kpts_cur_[id], matches, show);
+    cv::imshow("dynamic kp match", show);
+    cv::waitKey(0);
+    //-- DEBUG
+
     pose_estimation_2d2d(dy_kpts_ref_[id], dy_kpts_cur_[id], matches, R, t);
     std::vector<cv::Point3d> pts;
     triangulation(dy_kpts_ref_[id], dy_kpts_cur_[id], matches, R, t, pts);
@@ -546,12 +593,33 @@ void VisualOdometry::compute_dynamic_mappoints() {
     cv::cv2eigen(R, R_s);
     cv::cv2eigen(t, t_s);
     auto T_s = Eigen::Isometry3d::Identity();
-    T_s.rotate(R);
+    T_s.rotate(R_s);
     T_s.pretranslate(t_s);
     for (auto& p : pts) {
-      Eigen::Vector3f pt(p.x, p.y, p.z);
-      curr_->dynamic_map_points[id].emplace_back(T_s * pt);
-    } // get all mappoints
-  } // get all objects
+      Eigen::Vector3d pt(p.x, p.y, p.z);
+      pt = T_s * pt;
+      curr_->dynamic_map_points[id].emplace_back(float(p.x), float(p.y),
+                                                 float(p.z));
+    }  // get all mappoints
+    printf("Frame %d, OBJ %d, points is %lld", curr_->id_, id, pts.size());
+    //-- DEBUG
+    cv::Mat showed;
+    cv::drawMatches(ref_->color_, dy_kpts_ref_[id], curr_->color_,
+                    dy_kpts_cur_[id], matches, showed);
+    cv::imshow("dynamic kp match", showed);
+    cv::waitKey();
+    cv::destroyWindow("dynamic kp match");
+    //-- DEBUG
+    //-- DEBUG
+    //::window.showWidget("coordinate", vz::WCoordinateSystem());
+    //::window.showWidget(
+    //    "points", vz::WCloud(pts, vz::Color::red())
+    //);
+    //::window.spinOnce(1500);
+    //::window.removeAllWidgets();
+    //-- DEBUG
+  }  // get all objects
   cout << "compute all dynamic objs cost time " << timer.elapsed() << endl;
+}
+
 }  // namespace myslam

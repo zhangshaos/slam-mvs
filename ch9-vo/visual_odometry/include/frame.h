@@ -26,13 +26,17 @@ class Frame {
   std::vector<std::pair<unsigned long, cv::Mat>>
       dynamic_obj_masks;  // Obj-ID, Mask!
   std::unordered_map<unsigned long, std::vector<Eigen::Vector3f>>
-      dynamic_map_points; // Obj-ID, MapPoints
+      dynamic_map_points;  // Obj-ID, MapPoints
 
  public:  // data members
   Frame();
   Frame(long id, double time_stamp = 0, SE3 T_c_w = SE3(),
         Camera::Ptr camera = nullptr, Mat color = Mat(), Mat depth = Mat());
   ~Frame();
+  Frame(const Frame& o);
+  Frame& operator=(const Frame& o);
+  Frame(Frame&& o) = default;
+  Frame& operator=(Frame&& o) = default;
 
   static Frame::Ptr createFrame();
 
@@ -47,10 +51,9 @@ class Frame {
   // check if a point is in this frame
   bool isInFrame(const Vector3d& pt_world);
 
-  //
+  // 设置动态物体
   void setStaticBGMask(Mat mask);
   void addDynamicObjMask(unsigned long id, Mat mask);
-  void addObjMapPoint(MapPoint::Ptr& p);
 };
 
 }  // namespace myslam
